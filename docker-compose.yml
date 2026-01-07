@@ -1,0 +1,14 @@
+
+services:
+  orgmdns:
+    image: orgmcr.or-gm.co/osmargm1202/orgmdns:latest
+    container_name: orgmdns
+    restart: always
+    environment:
+      # Usar archivo .env para variables de entorno
+      env_file:
+        - .env
+    volumes:
+      - ./logs:/app/logs
+    # Opcional: descomentar para activar debug desde docker-compose
+    # command: ["--debug"]
