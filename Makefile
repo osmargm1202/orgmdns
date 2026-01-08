@@ -3,7 +3,7 @@
 # Variables
 BINARY_NAME=orgmdns
 BINARY_PATH=./$(BINARY_NAME)
-IMAGE=orgmcr.or-gm.co/osmargm1202/orgmdns:latest
+IMAGE=orgmcr.or-gm.com/osmargm1202/orgmdns:latest
 DOCKER_REGISTRY=orgmcr.or-gm.co
 
 # Build local
