@@ -141,7 +141,14 @@ El archivo `docker-compose.yml` está listo para desplegar en el servidor.
    - `docker-compose.yml`
    - Archivo `.env` con las variables de entorno (o definirlas directamente en el compose)
 
-2. **Levantar el servicio**:
+2. **Crear directorio de logs con permisos correctos**:
+```bash
+mkdir -p logs
+chmod 777 logs
+```
+**Importante**: El directorio `logs/` debe existir y tener permisos de escritura para que el contenedor pueda escribir los logs. Si no puede escribir al archivo, la aplicación usará solo stdout (no fallará).
+
+3. **Levantar el servicio**:
 ```bash
 docker compose up -d
 ```
@@ -312,6 +319,8 @@ Cuando se actualiza un registro DNS, se envía un correo con:
 ### Los logs no aparecen
 - Verifica permisos de escritura en el directorio `logs/`
 - En Docker, verifica que el volumen esté montado correctamente
+- Si el contenedor no puede escribir al archivo, los logs solo aparecerán en stdout (verifica con `docker compose logs`)
+- Asegúrate de que el directorio `logs/` en el host tenga permisos `777` o pertenezca al usuario correcto
 
 ## Makefile
 

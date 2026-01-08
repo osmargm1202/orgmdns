@@ -1,14 +1,33 @@
+version: '3.8'
 
 services:
   orgmdns:
-    image: orgmcr.or-gm.co/osmargm1202/orgmdns:latest
+    image: orgmcr.or-gm.com/osmargm1202/orgmdns:latest
     container_name: orgmdns
     restart: always
+    env_file:
+      - .env
     environment:
-      # Usar archivo .env para variables de entorno
-      env_file:
-        - .env
+      # Cloudflare
+      - ACCOUNT_ID=${ACCOUNT_ID}
+      - API_KEY=${API_KEY}
+      - API_EMAIL=${API_EMAIL:-}
+      - ZONE_ID=${ZONE_ID}
+      # Email
+      - EMAIL=${EMAIL:-osmar@or-gm.com}
+      - EMAIL_FROM=${EMAIL_FROM:-osmar@or-gm.com}
+      - EMAIL_TO=${EMAIL_TO:-osmargm1202@gmail.com}
+      - EMAIL_PASSWORD=${EMAIL_PASSWORD}
+      - SMTP_HOST=${SMTP_HOST:-smtp.gmail.com}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      # App
+      - SLEEP_TIME=${SLEEP_TIME:-10}
+      - RECORD_NAMES=${RECORD_NAMES}
+      - DEBUG=${DEBUG:-false}
+      # Logs
+      - LOGS_DIR=/app/logs
     volumes:
       - ./logs:/app/logs
-    # Opcional: descomentar para activar debug desde docker-compose
-    # command: ["--debug"]
+    # Asegurar que el directorio logs existe y tiene permisos correctos
+    # Ejecutar en el host: mkdir -p logs && chmod 777 logs
+

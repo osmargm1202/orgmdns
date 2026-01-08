@@ -24,8 +24,9 @@ WORKDIR /app
 # Copiar binario desde builder
 COPY --from=builder /build/orgmdns /app/orgmdns
 
-# Nota: El directorio logs/ se creará automáticamente por la aplicación
-# o se montará como volumen desde docker-compose
+# Nota: El directorio logs/ se montará como volumen desde docker-compose
+# El logger manejará graciosamente si no puede escribir al archivo (usará solo stdout)
+# Asegúrate de que el directorio ./logs en el host tenga permisos 777 o pertenezca al usuario del contenedor
 
 # Usuario no root (distroless ya viene con usuario no root)
 USER nonroot:nonroot

@@ -16,30 +16,41 @@ type Logger struct {
 }
 
 func Init(debug bool) *Logger {
-	// Asegurar que existe el directorio logs/
-	logsDir := "logs"
-	if err := os.MkdirAll(logsDir, 0755); err != nil {
-		panic(fmt.Sprintf("No se pudo crear directorio logs/: %v", err))
-	}
-
-	// Abrir archivo de log
-	logFile, err := os.OpenFile(
-		filepath.Join(logsDir, "app.log"),
-		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
-		0644,
-	)
-	if err != nil {
-		panic(fmt.Sprintf("No se pudo abrir archivo de log: %v", err))
-	}
-
 	// Configurar nivel de log
 	level := slog.LevelInfo
 	if debug {
 		level = slog.LevelDebug
 	}
 
-	// Crear writers múltiples (consola + archivo)
-	multiWriter := io.MultiWriter(os.Stdout, logFile)
+	// Intentar usar directorio de logs (puede ser volumen montado o directorio local)
+	logsDir := os.Getenv("LOGS_DIR")
+	if logsDir == "" {
+		logsDir = "logs"
+	}
+
+	var logFile *os.File
+	var multiWriter io.Writer = os.Stdout
+
+	// Intentar crear directorio y archivo de log
+	// Si falla, solo usaremos stdout (no hacemos panic)
+	if err := os.MkdirAll(logsDir, 0755); err == nil {
+		logPath := filepath.Join(logsDir, "app.log")
+		file, err := os.OpenFile(
+			logPath,
+			os.O_CREATE|os.O_WRONLY|os.O_APPEND,
+			0644,
+		)
+		if err == nil {
+			logFile = file
+			multiWriter = io.MultiWriter(os.Stdout, logFile)
+		} else {
+			// Si no puede escribir al archivo, solo usar stdout
+			fmt.Fprintf(os.Stderr, "Warning: No se pudo abrir archivo de log (%s), usando solo stdout: %v\n", logPath, err)
+		}
+	} else {
+		// Si no puede crear el directorio, solo usar stdout
+		fmt.Fprintf(os.Stderr, "Warning: No se pudo crear directorio logs/ (%s), usando solo stdout: %v\n", logsDir, err)
+	}
 
 	// Crear handler de texto con colores opcionales
 	opts := &slog.HandlerOptions{
