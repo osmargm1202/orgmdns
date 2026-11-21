@@ -1,0 +1,9 @@
+services:
+  orgmdns:
+    image: orgmdns:correo-9ace318
+    pull_policy: never
+    environment:
+      NOTIFICATION_DIR: /notifications
+      NOTIFICATION_SETTLE_SECONDS: "90"
+    volumes:
+      - /home/osmarg/notification-events:/notifications
