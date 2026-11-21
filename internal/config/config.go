@@ -9,6 +9,8 @@ import (
 )
 
 type Config struct {
+	NotificationDir    string
+	NotificationSettle time.Duration
 	// Cloudflare
 	AccountID string
 	APIKey    string
@@ -31,6 +33,18 @@ type Config struct {
 
 func Load() (*Config, error) {
 	cfg := &Config{}
+	cfg.NotificationDir = os.Getenv("NOTIFICATION_DIR")
+	if cfg.NotificationDir != "" {
+		seconds := 90
+		if value := os.Getenv("NOTIFICATION_SETTLE_SECONDS"); value != "" {
+			var err error
+			seconds, err = strconv.Atoi(value)
+			if err != nil || seconds < 0 {
+				return nil, fmt.Errorf("NOTIFICATION_SETTLE_SECONDS debe ser un entero no negativo")
+			}
+		}
+		cfg.NotificationSettle = time.Duration(seconds) * time.Second
+	}
 
 	// Cloudflare
 	cfg.AccountID = os.Getenv("ACCOUNT_ID")

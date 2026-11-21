@@ -274,14 +274,28 @@ La aplicación usa dos métodos para obtener la IP pública:
 
 ## Notificaciones por Correo
 
-Cuando se actualiza un registro DNS, se envía un correo con:
+Se envía un único resumen por ciclo con novedades: inicio, reconexión,
+cambio de IP pública, actualizaciones DNS confirmadas y errores por registro.
+El correo contiene una tabla HTML y una alternativa de texto simple. Los ciclos
+sin eventos no generan correo. Un error en un registro no impide procesar los demás.
 
-- **Asunto**: `[orgmdns] DNS actualizado: <nombre_del_registro>`
-- **Contenido**:
-  - Nombre del registro modificado
-  - IP anterior
-  - IP nueva
-  - Fecha y hora del cambio
+Para reunir también los avisos de `orgmserver`, configurar `NOTIFICATION_DIR`
+en ambos contenedores apuntando a la misma carpeta montada. Sólo `orgmdns` envía
+correo; `orgmserver` publica eventos JSON de forma atómica. Los eventos se borran
+después de que SMTP confirma la entrega y permanecen tras un reinicio.
+`NOTIFICATION_SETTLE_SECONDS` (90 por defecto en modo compartido) exige un período
+sin eventos nuevos antes de enviar, para dar tiempo a ambos monitores a registrar
+una reconexión. Se comprueba al finalizar cada ciclo; con `SLEEP_TIME=10` el aviso
+puede tardar uno o más ciclos. Esto agrupa los eventos disponibles, sin prometer
+un correo único para sucesos que ocurran después de cerrar el resumen.
+
+Si no se configura una cola, sólo los eventos de DNS se conservan en memoria
+cuando falla SMTP. En modo compartido, un fallo del disco conserva temporalmente
+el evento en memoria y se registra en logs. SMTP y el borrado de archivos no son
+una transacción: una caída después de aceptar el correo y antes del borrado puede
+repetir el resumen. No se promete entrega exactamente una vez.
+
+La instalación y reversión revisables están en [UNIFICACION_CORREOS.md](UNIFICACION_CORREOS.md).
 
 **Configuración SMTP**:
 - Host: Configurable con `SMTP_HOST` (default: `smtp.gmail.com`)

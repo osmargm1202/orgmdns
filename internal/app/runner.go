@@ -2,6 +2,7 @@ package app
 
 import (
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/osmargm1202/orgmdns/internal/cloudflare"
@@ -11,155 +12,154 @@ import (
 	"github.com/osmargm1202/orgmdns/internal/notify"
 )
 
+type dnsClient interface {
+	GetDNSRecordByName(string) (*cloudflare.DNSRecord, error)
+	UpdateDNSRecordIP(string, string) error
+}
+type summaryNotifier interface{ SendSummary([]notify.Event) error }
+
 type Runner struct {
-	config          *config.Config
-	logger          *logger.Logger
-	cf              *cloudflare.Client
-	notifier        *notify.EmailNotifier
-	internetDown    bool
-	disconnectedAt   *time.Time
-	startupEmailSent bool
+	config         *config.Config
+	logger         *logger.Logger
+	cf             dnsClient
+	notifier       summaryNotifier
+	internetDown   bool
+	disconnectedAt *time.Time
+	startupQueued  bool
+	lastIP         string
+	pending        []notify.Event
+	checkInternet  func() bool
+	publicIP       func() (string, error)
 }
 
 func NewRunner(cfg *config.Config, log *logger.Logger) *Runner {
-	cfClient := cloudflare.NewClient(cfg.AccountID, cfg.APIKey, cfg.ZoneID, cfg.APIEmail)
-	emailNotifier := notify.NewEmailNotifier(cfg.EmailFrom, cfg.EmailTo, cfg.EmailPassword, cfg.SMTPHost, cfg.SMTPPort)
-
-	// Log del método de autenticación usado
-	if cfg.APIEmail != "" {
-		log.Info(fmt.Sprintf("Usando autenticación Cloudflare: API Key + Email (método legacy) - Email: %s", cfg.APIEmail))
-	} else {
-		log.Info(fmt.Sprintf("Usando autenticación Cloudflare: API Token (Bearer)"))
-		log.Info(fmt.Sprintf("Si tienes problemas de autenticación, configura API_EMAIL con tu email de Cloudflare"))
-	}
-
 	return &Runner{
-		config:   cfg,
-		logger:   log,
-		cf:       cfClient,
-		notifier: emailNotifier,
+		config: cfg, logger: log,
+		cf:            cloudflare.NewClient(cfg.AccountID, cfg.APIKey, cfg.ZoneID, cfg.APIEmail),
+		notifier:      notify.NewEmailNotifier(cfg.EmailFrom, cfg.EmailTo, cfg.EmailPassword, cfg.SMTPHost, cfg.SMTPPort),
+		checkInternet: ip.CheckInternetConnection, publicIP: ip.GetPublicIP,
 	}
 }
 
 func (r *Runner) Run() error {
 	r.logger.Info("Iniciando bucle principal de verificación de IP")
-
 	for {
-		r.logger.Debug("Iniciando ciclo de verificación")
-
-		// Verificar conexión a internet (como en Python)
-		if !ip.CheckInternetConnection() {
-			if !r.internetDown {
-				// Primera vez que se detecta sin conexión
-				now := time.Now()
-				r.disconnectedAt = &now
-				r.internetDown = true
-				r.logger.Error("No hay conexión a internet")
-				// No enviamos correo aquí porque no hay conexión para enviarlo
-			}
-			r.sleep()
-			continue
-		}
-
-		// Si llegamos aquí, hay conexión a internet
-		if r.internetDown {
-			// Se ha restaurado la conexión
-			r.logger.Info("Se ha restaurado la conexión a internet")
-			
-			// Calcular tiempo sin conexión
-			if r.disconnectedAt != nil {
-				duration := time.Since(*r.disconnectedAt)
-				r.logger.Info(fmt.Sprintf("Tiempo sin conexión: %v", duration))
-				
-				// Enviar correo de restauración
-				if err := r.notifier.SendConnectionRestoredNotification(duration); err != nil {
-					r.logger.Error(fmt.Sprintf("Error enviando correo de restauración: %v", err))
-				} else {
-					r.logger.Info("Correo de restauración de conexión enviado")
-				}
-			}
-			
-			r.internetDown = false
-			r.disconnectedAt = nil
-		}
-
-		// Obtener IP pública actual
-		currentIP, err := ip.GetPublicIP()
-		if err != nil {
-			r.logger.Error(fmt.Sprintf("Error obteniendo IP pública: %v", err))
-			// Continuar al siguiente ciclo después del sleep
-			r.sleep()
-			continue
-		}
-
-		r.logger.Info(fmt.Sprintf("IP pública detectada: %s", currentIP))
-
-		// Enviar correo de inicio solo la primera vez
-		if !r.startupEmailSent {
-			if err := r.notifier.SendStartupNotification(currentIP, r.config.RecordNames); err != nil {
-				r.logger.Error(fmt.Sprintf("Error enviando correo de inicio: %v", err))
-			} else {
-				r.logger.Info("Correo de inicio enviado: Verificador DNS corriendo")
-				r.startupEmailSent = true
-			}
-		}
-
-		r.logger.Debug(fmt.Sprintf("Verificando %d registros DNS", len(r.config.RecordNames)))
-
-		// Procesar cada registro
-		for _, recordName := range r.config.RecordNames {
-			if err := r.processRecord(recordName, currentIP); err != nil {
-				r.logger.Error(fmt.Sprintf("Error procesando registro %s: %v", recordName, err))
-				// Continuar con el siguiente registro
-				continue
-			}
-		}
-
-		r.logger.Debug(fmt.Sprintf("Ciclo completado, esperando %d minutos", r.config.SleepTime))
-		r.sleep()
+		r.runCycle()
+		time.Sleep(r.config.SleepDuration())
 	}
 }
 
-func (r *Runner) processRecord(recordName, currentIP string) error {
-	r.logger.Debug(fmt.Sprintf("Procesando registro: %s", recordName))
-
-	// Obtener registro actual de Cloudflare (obtiene todos y filtra localmente como Python)
-	record, err := r.cf.GetDNSRecordByName(recordName)
-	if err != nil {
-		return fmt.Errorf("error obteniendo registro DNS: %w", err)
+func (r *Runner) addEvent(kind, record, oldIP, newIP, detail string) {
+	// Coalesce identical pending failures while SMTP is unavailable.
+	for _, e := range r.pending {
+		if e.Kind == kind && e.Record == record && e.OldIP == oldIP && e.NewIP == newIP && e.Detail == detail {
+			return
+		}
 	}
+	event := notify.Event{Time: time.Now(), Kind: kind, Record: record, OldIP: oldIP, NewIP: newIP, Detail: detail}
+	if r.config.NotificationDir != "" {
+		if err := notify.Enqueue(r.config.NotificationDir, event); err == nil {
+			return
+		} else {
+			r.logger.Error(fmt.Sprintf("No se pudo guardar evento; se conserva en memoria: %v", err))
+		}
+	}
+	r.pending = append(r.pending, event)
+}
 
-	r.logger.Debug(fmt.Sprintf("Registro DNS encontrado: %s -> %s (ID: %s)", record.Name, record.Content, record.ID))
+func (r *Runner) runCycle() {
+	if !r.checkInternet() {
+		if !r.internetDown {
+			now := time.Now()
+			r.disconnectedAt = &now
+			r.internetDown = true
+			r.logger.Error("No hay conexión a internet")
+		}
+		return
+	}
+	if r.internetDown {
+		detail := "Conexión restaurada"
+		if r.disconnectedAt != nil {
+			detail += fmt.Sprintf("; tiempo sin conexión: %s", time.Since(*r.disconnectedAt).Round(time.Second))
+		}
+		r.addEvent("Reconexión", "", "", "", detail)
+		r.internetDown = false
+		r.disconnectedAt = nil
+	}
+	currentIP, err := r.publicIP()
+	if err != nil {
+		r.logger.Error(fmt.Sprintf("Error obteniendo IP pública: %v", err))
+		r.addEvent("Error", "", "", "", "No se pudo obtener la IP pública; no se modificaron registros DNS")
+		r.flush()
+		return
+	}
+	if !r.startupQueued {
+		r.addEvent("Inicio", "", "", currentIP, "Verificador iniciado")
+		r.startupQueued = true
+	}
+	if r.lastIP != "" && r.lastIP != currentIP {
+		r.addEvent("Cambio de IP pública", "", r.lastIP, currentIP, "IP detectada; consultar el resultado DNS en las filas siguientes")
+	}
+	r.lastIP = currentIP
+	for _, name := range r.config.RecordNames {
+		if err := r.processRecord(name, currentIP); err != nil {
+			r.logger.Error(fmt.Sprintf("Error procesando %s: %v", name, err))
+		}
+	}
+	r.flush()
+}
 
-	// Comparar IPs
+func (r *Runner) processRecord(name, currentIP string) error {
+	record, err := r.cf.GetDNSRecordByName(name)
+	if err != nil {
+		r.addEvent("Error DNS", name, "", currentIP, "No se pudo consultar el registro; no se confirmó ninguna actualización")
+		return err
+	}
 	if record.Content == currentIP {
-		r.logger.Debug(fmt.Sprintf("IP del registro %s coincide con IP actual (%s), no se requiere actualización", recordName, currentIP))
 		return nil
 	}
-
-	oldIP := record.Content
-	r.logger.Info(fmt.Sprintf("IP diferente detectada para %s: DNS=%s, Actual=%s. Actualizando...", recordName, oldIP, currentIP))
-
-	// Actualizar registro en Cloudflare
 	if err := r.cf.UpdateDNSRecordIP(record.ID, currentIP); err != nil {
-		return fmt.Errorf("error actualizando registro DNS: %w", err)
+		r.addEvent("Error DNS", name, record.Content, currentIP, "Cloudflare no confirmó la actualización; se reintentará en el próximo ciclo")
+		return err
 	}
-
-	r.logger.Info(fmt.Sprintf("Registro %s actualizado exitosamente: %s -> %s", recordName, oldIP, currentIP))
-
-	// Enviar notificación por correo
-	if err := r.notifier.SendDNSUpdateNotification(recordName, oldIP, currentIP); err != nil {
-		r.logger.Error(fmt.Sprintf("Error enviando correo de notificación: %v", err))
-		// No retornamos error aquí, el cambio de DNS ya se hizo
-	} else {
-		r.logger.Debug(fmt.Sprintf("Correo de notificación enviado para %s", recordName))
-	}
-
+	r.addEvent("DNS actualizado", name, record.Content, currentIP, "Actualización confirmada por Cloudflare")
+	r.logger.Info(fmt.Sprintf("Registro %s actualizado: %s -> %s", name, record.Content, currentIP))
 	return nil
 }
 
-func (r *Runner) sleep() {
-	duration := r.config.SleepDuration()
-	r.logger.Debug(fmt.Sprintf("Durmiendo por %v", duration))
-	time.Sleep(duration)
+func (r *Runner) flush() {
+	events := append([]notify.Event(nil), r.pending...)
+	var queued []notify.QueuedEvent
+	if r.config.NotificationDir != "" {
+		var err error
+		queued, err = notify.ReadQueue(r.config.NotificationDir)
+		if err != nil {
+			r.logger.Error(fmt.Sprintf("No se pudo leer la cola: %v", err))
+			return
+		}
+		for _, entry := range queued {
+			events = append(events, entry.Event)
+		}
+	}
+	if len(events) == 0 {
+		return
+	}
+	// Wait for a quiet interval so the independent server monitor can contribute
+	// reconnection/IP events before the DNS process sends the incident summary.
+	for _, event := range events {
+		if time.Since(event.Time) < r.config.NotificationSettle {
+			return
+		}
+	}
+	if err := r.notifier.SendSummary(events); err != nil {
+		r.logger.Error(fmt.Sprintf("No se pudo enviar el resumen; se conserva para reintentar: %v", err))
+		return
+	}
+	for _, entry := range queued {
+		if err := os.Remove(entry.Path); err != nil {
+			r.logger.Error(fmt.Sprintf("Resumen enviado pero no se pudo confirmar evento en cola: %v", err))
+		}
+	}
+	r.logger.Info(fmt.Sprintf("Resumen enviado con %d eventos", len(events)))
+	r.pending = nil
 }

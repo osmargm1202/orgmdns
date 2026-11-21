@@ -1,176 +1,101 @@
 package notify
 
 import (
+	"bytes"
 	"fmt"
+	"html/template"
+	"mime"
+	"mime/multipart"
+	"mime/quotedprintable"
 	"net/smtp"
+	"net/textproto"
 	"time"
 )
 
+type Event struct {
+	Time   time.Time
+	Kind   string
+	Record string
+	OldIP  string
+	NewIP  string
+	Detail string
+}
+
 type EmailNotifier struct {
-	from     string
-	to       string
-	password string
-	smtpHost string
-	smtpPort string
+	from, to, password, smtpHost, smtpPort string
 }
 
 func NewEmailNotifier(from, to, password, smtpHost, smtpPort string) *EmailNotifier {
-	return &EmailNotifier{
-		from:     from,
-		to:       to,
-		password: password,
-		smtpHost: smtpHost,
-		smtpPort: smtpPort,
-	}
+	return &EmailNotifier{from, to, password, smtpHost, smtpPort}
 }
 
-// SendDNSUpdateNotification envía un correo notificando el cambio de IP en un registro DNS
-func (e *EmailNotifier) SendDNSUpdateNotification(recordName, oldIP, newIP string) error {
-	subject := fmt.Sprintf("[orgmdns] DNS actualizado: %s", recordName)
-	body := fmt.Sprintf(`Hola,
+var summaryTemplate = template.Must(template.New("summary").Parse(`<!doctype html>
+<html lang="es"><body style="margin:0;background:#f1f5f9;font-family:Arial,sans-serif;color:#1e293b">
+<table role="presentation" width="100%"><tr><td style="padding:24px">
+<table role="presentation" width="100%" style="max-width:900px;margin:auto;background:white;border-radius:12px"><tr><td style="padding:28px;background:#0f172a;color:white">
+<p style="margin:0;color:#93c5fd">ORGM · INFRAESTRUCTURA</p><h1 style="font-size:24px">Resumen de servidor y DNS</h1>
+<p>{{.Count}} eventos · {{.Date}}</p></td></tr><tr><td style="padding:24px">
+<p>Resultado de la verificación automática. Las actualizaciones confirmadas y los errores aparecen por separado en cada fila.</p>
+<table width="100%" cellpadding="10" cellspacing="0" style="border-collapse:collapse;font-size:13px;text-align:left">
+<tr style="background:#e2e8f0"><th>Fecha / evento</th><th>Registro</th><th>IP anterior</th><th>IP nueva</th><th>Resultado</th></tr>
+{{range .Events}}<tr><td style="border-bottom:1px solid #e2e8f0">{{.Time.Format "2006-01-02 15:04:05 MST"}}<br><strong>{{.Kind}}</strong></td><td>{{.Record}}</td><td>{{.OldIP}}</td><td>{{.NewIP}}</td><td style="border-bottom:1px solid #e2e8f0;white-space:pre-line">{{.Detail}}</td></tr>{{end}}
+</table><p style="color:#64748b;font-size:12px">Aviso automático de orgmdns. Un resumen por ciclo con novedades; los ciclos sin novedades no generan correo.</p>
+</td></tr></table></td></tr></table></body></html>`))
 
-El registro DNS ha sido actualizado automáticamente por orgmdns.
-
-Detalles:
-- Registro: %s
-- IP anterior: %s
-- IP nueva: %s
-- Fecha/hora: %s
-
-Este es un mensaje automático, por favor no respondas.
-
---
-orgmdns
-`, recordName, oldIP, newIP, time.Now().Format("2006-01-02 15:04:05 MST"))
-
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", e.from, e.to, subject, body)
-
-	auth := smtp.PlainAuth("", e.from, e.password, e.smtpHost)
-
-	addr := fmt.Sprintf("%s:%s", e.smtpHost, e.smtpPort)
-	err := smtp.SendMail(addr, auth, e.from, []string{e.to}, []byte(message))
-	if err != nil {
-		return fmt.Errorf("error enviando correo: %w", err)
+// BuildMessage creates a UTF-8 multipart email; html/template escapes all event data.
+func BuildMessage(from, to string, events []Event) ([]byte, error) {
+	var html bytes.Buffer
+	data := struct {
+		Count  int
+		Date   string
+		Events []Event
+	}{len(events), time.Now().Format(time.RFC3339), events}
+	if err := summaryTemplate.Execute(&html, data); err != nil {
+		return nil, err
 	}
-
-	return nil
-}
-
-// SendStartupNotification envía un correo cuando inicia el verificador DNS
-func (e *EmailNotifier) SendStartupNotification(currentIP string, recordNames []string) error {
-	subject := "[orgmdns] Verificador DNS corriendo"
-	
-	// Formatear lista de subdominios
-	recordsList := ""
-	for i, name := range recordNames {
-		recordsList += fmt.Sprintf("- %s", name)
-		if i < len(recordNames)-1 {
-			recordsList += "\n"
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	var plain bytes.Buffer
+	fmt.Fprintln(&plain, "ORGM — Resumen de servidor y DNS")
+	for _, event := range events {
+		fmt.Fprintf(&plain, "%s | %s | %s | %s -> %s | %s\n", event.Time.Format(time.RFC3339), event.Kind, event.Record, event.OldIP, event.NewIP, event.Detail)
+	}
+	for _, part := range []struct{ kind, text string }{{"text/plain", plain.String()}, {"text/html", html.String()}} {
+		h := textproto.MIMEHeader{}
+		h.Set("Content-Type", part.kind+"; charset=UTF-8")
+		h.Set("Content-Transfer-Encoding", "quoted-printable")
+		p, err := writer.CreatePart(h)
+		if err != nil {
+			return nil, err
+		}
+		q := quotedprintable.NewWriter(p)
+		if _, err := q.Write([]byte(part.text)); err != nil {
+			return nil, err
+		}
+		if err := q.Close(); err != nil {
+			return nil, err
 		}
 	}
-	
-	body := fmt.Sprintf(`Hola,
-
-El verificador DNS ha iniciado correctamente.
-
-Detalles:
-- IP pública detectada: %s
-- Fecha/hora de inicio: %s
-- Subdominios configurados:
-%s
-
-El sistema está monitoreando los registros DNS configurados.
-
-Este es un mensaje automático, por favor no respondas.
-
---
-orgmdns
-`, currentIP, time.Now().Format("2006-01-02 15:04:05 MST"), recordsList)
-
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", e.from, e.to, subject, body)
-
-	auth := smtp.PlainAuth("", e.from, e.password, e.smtpHost)
-
-	addr := fmt.Sprintf("%s:%s", e.smtpHost, e.smtpPort)
-	err := smtp.SendMail(addr, auth, e.from, []string{e.to}, []byte(message))
-	if err != nil {
-		return fmt.Errorf("error enviando correo de inicio: %w", err)
+	if err := writer.Close(); err != nil {
+		return nil, err
 	}
-
-	return nil
+	var msg bytes.Buffer
+	fmt.Fprintf(&msg, "From: %s\r\nTo: %s\r\nSubject: %s\r\nDate: %s\r\nMIME-Version: 1.0\r\nContent-Type: multipart/alternative; boundary=%q\r\n\r\n", from, to, mime.QEncoding.Encode("UTF-8", fmt.Sprintf("[orgmdns] Resumen: %d eventos", len(events))), time.Now().Format(time.RFC1123Z), writer.Boundary())
+	msg.Write(body.Bytes())
+	return msg.Bytes(), nil
 }
 
-// SendConnectionRestoredNotification envía un correo cuando se restaura la conexión
-func (e *EmailNotifier) SendConnectionRestoredNotification(duration time.Duration) error {
-	subject := "[orgmdns] Conexión a internet restaurada"
-	
-	// Formatear duración de forma legible
-	var durationStr string
-	days := int(duration.Hours() / 24)
-	hours := int(duration.Hours()) % 24
-	minutes := int(duration.Minutes()) % 60
-
-	if days > 0 {
-		durationStr = fmt.Sprintf("%d día(s), %d hora(s), %d minuto(s)", days, hours, minutes)
-	} else if hours > 0 {
-		durationStr = fmt.Sprintf("%d hora(s), %d minuto(s)", hours, minutes)
-	} else {
-		durationStr = fmt.Sprintf("%d minuto(s)", minutes)
+func (e *EmailNotifier) SendSummary(events []Event) error {
+	if len(events) == 0 {
+		return nil
 	}
-
-	body := fmt.Sprintf(`Hola,
-
-La conexión a internet se ha restablecido en el sistema DNS.
-
-Detalles:
-- Tiempo sin conexión: %s
-- Fecha/hora de restauración: %s
-
-El verificador DNS ha reanudado su funcionamiento normal.
-
-Este es un mensaje automático, por favor no respondas.
-
---
-orgmdns
-`, durationStr, time.Now().Format("2006-01-02 15:04:05 MST"))
-
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", e.from, e.to, subject, body)
-
-	auth := smtp.PlainAuth("", e.from, e.password, e.smtpHost)
-
-	addr := fmt.Sprintf("%s:%s", e.smtpHost, e.smtpPort)
-	err := smtp.SendMail(addr, auth, e.from, []string{e.to}, []byte(message))
+	msg, err := BuildMessage(e.from, e.to, events)
 	if err != nil {
-		return fmt.Errorf("error enviando correo de restauración: %w", err)
+		return err
 	}
-
-	return nil
-}
-
-// SendErrorNotification envía un correo notificando un error (opcional, para uso futuro)
-func (e *EmailNotifier) SendErrorNotification(errorMsg string) error {
-	subject := "[orgmdns] Error en la aplicación"
-	body := fmt.Sprintf(`Hola,
-
-Se ha producido un error en orgmdns:
-
-%s
-
-Fecha/hora: %s
-
---
-orgmdns
-`, errorMsg, time.Now().Format("2006-01-02 15:04:05 MST"))
-
-	message := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", e.from, e.to, subject, body)
-
 	auth := smtp.PlainAuth("", e.from, e.password, e.smtpHost)
-
-	addr := fmt.Sprintf("%s:%s", e.smtpHost, e.smtpPort)
-	err := smtp.SendMail(addr, auth, e.from, []string{e.to}, []byte(message))
-	if err != nil {
-		return fmt.Errorf("error enviando correo de error: %w", err)
+	if err := smtp.SendMail(e.smtpHost+":"+e.smtpPort, auth, e.from, []string{e.to}, msg); err != nil {
+		return fmt.Errorf("error enviando resumen: %w", err)
 	}
-
 	return nil
 }
